@@ -13,7 +13,7 @@ APP_SECRET = os.environ.get("KIS_APP_SECRET", "")
 
 BASE_URL = "https://openapi.koreainvestment.com:9443"
 
-TICKERS = ["005930", "009830", "101490"]
+TICKERS = ["005930", "489790", "101490"]
 PRICE_CACHE_TTL = 30  # seconds
 
 app = FastAPI(title="Korean Stock Price API")
