@@ -1,9 +1,20 @@
+import os
 import time
 import threading
-from datetime import datetime, timedelta
-from fastapi import FastAPI
+import requests
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pykrx import stock
+
+load_dotenv()
+
+APP_KEY    = os.environ.get("KIS_APP_KEY", "")
+APP_SECRET = os.environ.get("KIS_APP_SECRET", "")
+
+BASE_URL = "https://openapi.koreainvestment.com:9443"
+
+TICKERS = ["005930", "009830", "101490"]
+PRICE_CACHE_TTL = 30  # seconds
 
 app = FastAPI(title="Korean Stock Price API")
 
@@ -14,58 +25,87 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-TICKERS = ["005930", "009830", "101490"]
-CACHE_TTL = 30  # seconds
+# ── 토큰 캐시 ──────────────────────────────────────────
+_token: str = ""
+_token_expires_at: float = 0
+_token_lock = threading.Lock()
 
-_cache: dict = {}
-_cache_time: float = 0
-_lock = threading.Lock()
+def get_token() -> str:
+    global _token, _token_expires_at
+    with _token_lock:
+        if time.time() < _token_expires_at - 60:   # 만료 1분 전까지 재사용
+            return _token
+        resp = requests.post(
+            f"{BASE_URL}/oauth2/tokenP",
+            json={
+                "grant_type": "client_credentials",
+                "appkey": APP_KEY,
+                "appsecret": APP_SECRET,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        _token = data["access_token"]
+        # expires_in(초) 필드가 있으면 사용, 없으면 6시간 기본값
+        expires_in = int(data.get("expires_in", 21600))
+        _token_expires_at = time.time() + expires_in
+        return _token
 
 
-def latest_trading_date() -> str:
-    """오늘 또는 가장 최근 거래일을 YYYYMMDD 형태로 반환"""
-    today = datetime.today()
-    for i in range(7):
-        d = today - timedelta(days=i)
-        # 주말 제외 (0=월 ~ 4=금)
-        if d.weekday() < 5:
-            return d.strftime("%Y%m%d")
-    return today.strftime("%Y%m%d")
+# ── 주가 캐시 ──────────────────────────────────────────
+_price_cache: dict = {}
+_price_cache_time: float = 0
+_price_lock = threading.Lock()
 
+def fetch_price(ticker: str, token: str) -> int | None:
+    resp = requests.get(
+        f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "appkey": APP_KEY,
+            "appsecret": APP_SECRET,
+            "tr_id": "FHKST01010100",
+            "Content-Type": "application/json",
+        },
+        params={
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": ticker,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    price_str = data.get("output", {}).get("stck_prpr")
+    return int(price_str) if price_str else None
 
-def fetch_prices() -> dict:
+def fetch_all_prices() -> dict:
+    token = get_token()
     result = {}
-    date = latest_trading_date()
     for ticker in TICKERS:
         try:
-            df = stock.get_market_ohlcv_by_date(date, date, ticker)
-            if not df.empty:
-                result[ticker] = int(df["종가"].iloc[-1])
-            else:
-                # 당일 데이터 없으면 최근 5일치로 재시도
-                from_date = (datetime.strptime(date, "%Y%m%d") - timedelta(days=10)).strftime("%Y%m%d")
-                df2 = stock.get_market_ohlcv_by_date(from_date, date, ticker)
-                result[ticker] = int(df2["종가"].iloc[-1]) if not df2.empty else None
+            result[ticker] = fetch_price(ticker, token)
         except Exception as e:
             print(f"[WARN] {ticker}: {e}")
             result[ticker] = None
     return result
 
-
 def get_prices() -> dict:
-    global _cache, _cache_time
+    global _price_cache, _price_cache_time
     now = time.time()
-    with _lock:
-        if now - _cache_time >= CACHE_TTL or not _cache:
-            _cache = fetch_prices()
-            _cache_time = now
-        return dict(_cache)
+    with _price_lock:
+        if now - _price_cache_time >= PRICE_CACHE_TTL or not _price_cache:
+            _price_cache = fetch_all_prices()
+            _price_cache_time = now
+        return dict(_price_cache)
 
 
+# ── 엔드포인트 ─────────────────────────────────────────
 @app.get("/prices")
 def prices():
+    if not APP_KEY or not APP_SECRET:
+        raise HTTPException(status_code=500, detail="KIS_APP_KEY / KIS_APP_SECRET not set")
     return get_prices()
-
 
 @app.get("/health")
 def health():
