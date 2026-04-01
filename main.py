@@ -1,9 +1,8 @@
-import os
 import time
 import threading
+import yfinance as yf
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import FinanceDataReader as fdr
 
 app = FastAPI(title="Korean Stock Price API")
 
@@ -14,7 +13,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-TICKERS = ["005930", "009830", "101490"]
+# yfinance 종목코드 → 응답 키 매핑
+TICKERS = {
+    "005930.KS": "005930",
+    "009830.KS": "009830",
+    "101490.KS": "101490",
+}
+
 CACHE_TTL = 30  # seconds
 
 _cache: dict = {}
@@ -24,16 +29,15 @@ _lock = threading.Lock()
 
 def fetch_prices() -> dict:
     result = {}
-    for ticker in TICKERS:
+    for yf_ticker, code in TICKERS.items():
         try:
-            df = fdr.DataReader(ticker, exchange="KRX")
-            if not df.empty:
-                result[ticker] = int(df["Close"].iloc[-1])
-            else:
-                result[ticker] = None
+            ticker = yf.Ticker(yf_ticker)
+            info = ticker.fast_info
+            price = info.last_price
+            result[code] = int(price) if price else None
         except Exception as e:
-            print(f"[WARN] {ticker}: {e}")
-            result[ticker] = None
+            print(f"[WARN] {yf_ticker}: {e}")
+            result[code] = None
     return result
 
 
