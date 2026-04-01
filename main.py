@@ -1,8 +1,9 @@
 import time
 import threading
-import yfinance as yf
+from datetime import datetime, timedelta
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pykrx import stock
 
 app = FastAPI(title="Korean Stock Price API")
 
@@ -13,13 +14,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# yfinance 종목코드 → 응답 키 매핑
-TICKERS = {
-    "005930.KS": "005930",
-    "009830.KS": "009830",
-    "101490.KS": "101490",
-}
-
+TICKERS = ["005930", "009830", "101490"]
 CACHE_TTL = 30  # seconds
 
 _cache: dict = {}
@@ -27,17 +22,33 @@ _cache_time: float = 0
 _lock = threading.Lock()
 
 
+def latest_trading_date() -> str:
+    """오늘 또는 가장 최근 거래일을 YYYYMMDD 형태로 반환"""
+    today = datetime.today()
+    for i in range(7):
+        d = today - timedelta(days=i)
+        # 주말 제외 (0=월 ~ 4=금)
+        if d.weekday() < 5:
+            return d.strftime("%Y%m%d")
+    return today.strftime("%Y%m%d")
+
+
 def fetch_prices() -> dict:
     result = {}
-    for yf_ticker, code in TICKERS.items():
+    date = latest_trading_date()
+    for ticker in TICKERS:
         try:
-            ticker = yf.Ticker(yf_ticker)
-            info = ticker.fast_info
-            price = info.last_price
-            result[code] = int(price) if price else None
+            df = stock.get_market_ohlcv_by_date(date, date, ticker)
+            if not df.empty:
+                result[ticker] = int(df["종가"].iloc[-1])
+            else:
+                # 당일 데이터 없으면 최근 5일치로 재시도
+                from_date = (datetime.strptime(date, "%Y%m%d") - timedelta(days=10)).strftime("%Y%m%d")
+                df2 = stock.get_market_ohlcv_by_date(from_date, date, ticker)
+                result[ticker] = int(df2["종가"].iloc[-1]) if not df2.empty else None
         except Exception as e:
-            print(f"[WARN] {yf_ticker}: {e}")
-            result[code] = None
+            print(f"[WARN] {ticker}: {e}")
+            result[ticker] = None
     return result
 
 
