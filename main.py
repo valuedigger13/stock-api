@@ -225,6 +225,58 @@ def fortune(member: str = Query(default="도원")):
     return {"fortune": text}
 
 
+@app.get("/history")
+def history(ticker: str = Query(...), period: str = Query("1y")):
+    """
+    period: 1d | 1w | 3m | 6m | 1y
+    한투 API 일별 주가 조회 (국내주식 기간별 시세)
+    """
+    from datetime import datetime, timedelta
+    token = get_token()
+
+    today = datetime.today()
+    period_map = {
+        "1d": timedelta(days=2),
+        "1w": timedelta(weeks=1),
+        "3m": timedelta(days=92),
+        "6m": timedelta(days=183),
+        "1y": timedelta(days=365),
+    }
+    delta = period_map.get(period, timedelta(days=365))
+    start_str = (today - delta).strftime("%Y%m%d")
+    end_str   = today.strftime("%Y%m%d")
+
+    resp = requests.get(
+        f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+        headers={
+            "content-type": "application/json",
+            "authorization": f"Bearer {token}",
+            "appkey": APP_KEY,
+            "appsecret": APP_SECRET,
+            "tr_id": "FHKST03010100",
+        },
+        params={
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": ticker,
+            "FID_INPUT_DATE_1": start_str,
+            "FID_INPUT_DATE_2": end_str,
+            "FID_PERIOD_DIV_CODE": "D",
+            "FID_ORG_ADJ_PRC": "0",
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+    output = resp.json().get("output2", [])
+    result = [
+        {"date": r["stck_bsop_date"], "close": int(r["stck_clpr"])}
+        for r in output
+        if r.get("stck_clpr") and r["stck_clpr"] != "0"
+    ]
+    result.sort(key=lambda x: x["date"])
+    return {"ticker": ticker, "data": result}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
